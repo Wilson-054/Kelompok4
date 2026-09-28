@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Smart Trash Bin — Live Dashboard</title>
+<script>
+  (function () {
+    const mem = {};
+    Object.defineProperty(window, "localStorage", {
+      configurable: true,
+      value: {
+        getItem: (k) => (k in mem ? mem[k] : null),
+        setItem: (k, v) => { mem[k] = String(v); },
+        removeItem: (k) => { delete mem[k]; },
+        key: (i) => Object.keys(mem)[i] ?? null,
+        get length() { return Object.keys(mem).length; },
+      },
+    });
+  })();
+</script>
+<script src="mqttws31.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', Arial, sans-serif; background: #0B1836; color: white; padding: 40px; min-height: 100vh; }
+  h1 { color: #DDEBB0; margin-bottom: 4px; }
+  .status-bar { color: #9FB3D6; font-size: 13px; margin-bottom: 30px; }
+  .status-bar.connected { color: #6B8F47; }
+  .status-bar.disconnected { color: #C0392B; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 20px; max-width: 1000px; }
+  .card { background: #1B2A4A; border-radius: 14px; padding: 24px; border: 1px solid #2A3B5E; }
+  .wide { grid-column: 1 / -1; }
+  .label { font-size: 12px; color: #9FB3D6; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 10px; }
+  .metric { font-size: 36px; font-weight: bold; }
+  .full { color: #E74C3C; }
+  .ok { color: #6B8F47; }
+  .warn { color: #C98A2B; }
+
+  .bar-track { background: #0B1836; border-radius: 20px; height: 24px; margin-top: 12px; overflow: hidden; }
+  .bar-fill { background: linear-gradient(90deg, #6B8F47, #C98A2B); height: 100%; width: 0%; transition: width 0.5s ease; }
+  .bar-fill.danger { background: linear-gradient(90deg, #C98A2B, #E74C3C); }
+
+  .devices { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; margin-top: 8px; }
+  .dev-card { background: #0B1836; border: 1px solid #2A3B5E; border-radius: 12px; padding: 16px; }
+  .dev-card.full-dev { border-color: #E74C3C; }
+  .dev-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .dev-name { font-size: 12px; color: #9FB3D6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dev-badge { font-size: 10px; font-weight: bold; padding: 3px 8px; border-radius: 10px; background: #6B8F47; color: #0B1836; white-space: nowrap; }
+  .dev-badge.full-badge { background: #E74C3C; color: white; }
+  .dev-pct { font-size: 30px; font-weight: bold; margin: 8px 0 4px; }
+  .dev-track { background: #1B2A4A; border-radius: 20px; height: 12px; overflow: hidden; }
+  .dev-fill { height: 100%; background: #6B8F47; transition: width 0.5s ease; }
+  .dev-fill.mid { background: #C98A2B; }
+  .dev-fill.danger { background: #E74C3C; }
+  .empty { color: #5B6B8C; font-size: 14px; padding: 8px 0; }
+
+  .lat-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .lat-badge { font-size: 12px; font-weight: bold; padding: 4px 12px; border-radius: 12px; background: #2A3B5E; color: #9FB3D6; }
+  .lat-badge.pass { background: #6B8F47; color: #0B1836; }
+  .lat-badge.fail { background: #E74C3C; color: white; }
+  .lat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 16px; margin-top: 12px; }
+  .lat-val { font-size: 28px; font-weight: bold; }
+  .lat-unit { font-size: 13px; color: #9FB3D6; font-weight: normal; }
+  .lat-sub { font-size: 11px; color: #9FB3D6; margin-top: 2px; }
+  .lat-break { margin-top: 16px; font-size: 13px; color: #9FB3D6; }
+  .lat-break b { color: white; }
+  .spark { width: 100%; height: 90px; margin-top: 14px; background: #0B1836; border-radius: 10px; }
+
+  .timestamp { font-size: 11px; color: #5B6B8C; margin-top: 20px; }
+</style>
+</head>
+<body>
+
+<h1>🗑️ Smart Trash Bin</h1>
+<div class="status-bar" id="connStatus">Menghubungkan ke broker...</div>
+
+<div class="grid">
+  <div class="card">
+    <div class="label">Jumlah Device Aktif</div>
+    <div class="metric" id="deviceCount">-</div>
+  </div>
+
+  <div class="card">
+    <div class="label">Status Armada</div>
+    <div class="metric" id="fullStatus">-</div>
+  </div>
+
+  <div class="card">
+    <div class="label">Jaringan Edge</div>
+    <div class="metric" id="netStatus">-</div>
+  </div>
+
+  <div class="card wide">
+    <div class="label">Rata-rata Fill Level (semua device)</div>
+    <div class="metric" id="avgFill">-%</div>
+    <div class="bar-track"><div class="bar-fill" id="fillBar"></div></div>
+  </div>
+
+  <div class="card">
+    <div class="label">Fill Tertinggi (window)</div>
+    <div class="metric" id="maxFill">-%</div>
+  </div>
+
+  <div class="card wide">
+    <div class="lat-head">
+      <div class="label" style="margin-bottom:0">Latensi Keputusan Edge (Think + Act)</div>
+      <div class="lat-badge" id="latBadge">menunggu data</div>
+    </div>
+    <div class="lat-grid">
+      <div><div class="lat-val" id="latMean">-</div><div class="lat-sub">rata-rata</div></div>
+      <div><div class="lat-val" id="latP95">-</div><div class="lat-sub">p95</div></div>
+      <div><div class="lat-val" id="latMax">-</div><div class="lat-sub">maksimum</div></div>
+      <div><div class="lat-val" id="latUnder">-</div><div class="lat-sub">sampel di bawah batas</div></div>
+    </div>
+    <div class="lat-break" id="latBreak">Rincian siklus terakhir: -</div>
+    <svg class="spark" id="spark" viewBox="0 0 600 90" preserveAspectRatio="none"></svg>
+    <div class="lat-sub" id="latNote">Garis putus-putus merah = batas 5 ms</div>
+  </div>
+
+  <div class="card wide">
+    <div class="label">Fill Level per Device</div>
+    <div class="devices" id="deviceList"><div class="empty">Menunggu data...</div></div>
+  </div>
+</div>
+
+<div class="timestamp" id="lastUpdate">Belum ada data masuk</div>
+
+<script>
+  const BROKER_HOST = "localhost";
+  const BROKER_PORT = 9001;
+  const TOPIC = "fog/bin1/summary";
+  const FULL_THRESHOLD = 80;
+  const SPARK_POINTS = 60;
+
+  const client = new Paho.MQTT.Client(BROKER_HOST, BROKER_PORT, "web-dashboard-" + Math.random().toString(16).slice(2));
+  const connStatusEl = document.getElementById("connStatus");
+  const latHistory = [];
+
+  function shortName(name) {
+    const parts = name.split("-");
+    return parts.length > 2 ? "pod-" + parts[parts.length - 1] : name;
+  }
+
+  function renderDevices(per) {
+    const list = document.getElementById("deviceList");
+    const entries = Object.entries(per || {}).sort((a, b) => a[0].localeCompare(b[0]));
+    if (!entries.length) {
+      list.innerHTML = '<div class="empty">Belum ada device yang mengirim data</div>';
+      return;
+    }
+    list.innerHTML = entries.map(([name, pct]) => {
+      const isFull = pct >= FULL_THRESHOLD;
+      const cls = isFull ? "danger" : (pct >= 60 ? "mid" : "");
+      return `
+        <div class="dev-card ${isFull ? "full-dev" : ""}">
+          <div class="dev-head">
+            <div class="dev-name" title="${name}">${shortName(name)}</div>
+            <div class="dev-badge ${isFull ? "full-badge" : ""}">${isFull ? "PENUH" : "NORMAL"}</div>
+          </div>
+          <div class="dev-pct">${pct}%</div>
+          <div class="dev-track"><div class="dev-fill ${cls}" style="width:${Math.min(100, pct)}%"></div></div>
+        </div>`;
+    }).join("");
+  }
+
+  function fmtMs(v) {
+    return (v === null || v === undefined) ? "-" : Number(v).toFixed(3) + ' <span class="lat-unit">ms</span>';
+  }
+
+  function drawSpark(limit) {
+    const svg = document.getElementById("spark");
+    if (latHistory.length < 2) { svg.innerHTML = ""; return; }
+    const W = 600, H = 90, pad = 6;
+    const ymax = Math.max(limit * 1.2, ...latHistory) * 1.05;
+    const y = (v) => H - pad - (v / ymax) * (H - 2 * pad);
+    const step = W / (SPARK_POINTS - 1);
+    const pts = latHistory.map((v, i) => `${(i * step).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+    const ly = y(limit).toFixed(1);
+    svg.innerHTML =
+      `<line x1="0" y1="${ly}" x2="${W}" y2="${ly}" stroke="#E74C3C" stroke-width="1" stroke-dasharray="6 4"/>` +
+      `<polyline points="${pts}" fill="none" stroke="#DDEBB0" stroke-width="2"/>`;
+  }
+
+  function renderLatency(lat) {
+    const badge = document.getElementById("latBadge");
+    if (!lat) {
+      badge.textContent = "belum ada data latensi";
+      badge.className = "lat-badge";
+      return;
+    }
+    const limit = lat.limit_ms ?? 5;
+    document.getElementById("latMean").innerHTML = fmtMs(lat.mean_ms);
+    document.getElementById("latP95").innerHTML = fmtMs(lat.p95_ms);
+    document.getElementById("latMax").innerHTML = fmtMs(lat.max_ms);
+    document.getElementById("latUnder").innerHTML = lat.under_limit_pct + '<span class="lat-unit"> %</span>';
+
+    const pass = lat.p95_ms < limit && lat.max_ms < limit;
+    badge.textContent = (pass ? "✔ di bawah " : "✖ melewati ") + limit + " ms (n=" + lat.count + ")";
+    badge.className = "lat-badge " + (pass ? "pass" : "fail");
+
+    const f = (v) => (v === null || v === undefined) ? "-" : v + " µs";
+    document.getElementById("latBreak").innerHTML =
+      "Rincian siklus terakhir: sense <b>" + f(lat.sense_us) + "</b> · think <b>" + f(lat.think_us) +
+      "</b> · act <b>" + f(lat.act_us) + "</b> · keputusan <b>" + (lat.last_ms ?? "-") + " ms</b>";
+
+    if (lat.last_ms !== null && lat.last_ms !== undefined) {
+      latHistory.push(Number(lat.last_ms));
+      if (latHistory.length > SPARK_POINTS) latHistory.shift();
+    }
+    drawSpark(limit);
+  }
+
+  client.onConnectionLost = (res) => {
+    connStatusEl.textContent = "⚠️ Terputus dari broker: " + res.errorMessage;
+    connStatusEl.className = "status-bar disconnected";
+    setTimeout(connect, 3000);
+  };
+
+  client.onMessageArrived = (msg) => {
+    const data = JSON.parse(msg.payloadString);
+    const per = data.per_device_avg || null;
+
+    document.getElementById("deviceCount").textContent = per ? Object.keys(per).length : 1;
+
+    const avg = data.avg_fill_pct ?? 0;
+    document.getElementById("avgFill").textContent = (data.avg_fill_pct ?? "-") + "%";
+    document.getElementById("maxFill").textContent = (data.max_fill_pct ?? "-") + "%";
+
+    const bar = document.getElementById("fillBar");
+    bar.style.width = Math.min(100, avg) + "%";
+    bar.className = "bar-fill" + (avg >= FULL_THRESHOLD ? " danger" : "");
+
+    const fullDevices = per ? Object.values(per).filter(p => p >= FULL_THRESHOLD).length : 0;
+    const anyFullEvent = (data.full_count_in_window ?? 0) > 0;
+    const fullEl = document.getElementById("fullStatus");
+    if (fullDevices > 0) {
+      fullEl.textContent = fullDevices + " PENUH";
+      fullEl.className = "metric full";
+    } else if (anyFullEvent) {
+      fullEl.textContent = "HAMPIR PENUH";
+      fullEl.className = "metric warn";
+    } else {
+      fullEl.textContent = "NORMAL";
+      fullEl.className = "metric ok";
+    }
+
+    document.getElementById("netStatus").textContent = data.latest_network_status ?? "-";
+
+    renderDevices(per || { [data.device_id ?? "device"]: data.avg_fill_pct ?? 0 });
+    renderLatency(data.latency);
+
+    document.getElementById("lastUpdate").textContent = "Update terakhir: " + new Date().toLocaleTimeString("id-ID");
+  };
+
+  function connect() {
+    connStatusEl.textContent = "Menghubungkan ke broker...";
+    connStatusEl.className = "status-bar";
+    client.connect({
+      onSuccess: () => {
+        connStatusEl.textContent = "✅ Terhubung ke broker (" + BROKER_HOST + ":" + BROKER_PORT + ")";
+        connStatusEl.className = "status-bar connected";
+        client.subscribe(TOPIC);
+      },
+      onFailure: (err) => {
+        connStatusEl.textContent = "❌ Gagal konek: " + err.errorMessage;
+        connStatusEl.className = "status-bar disconnected";
+        setTimeout(connect, 3000);
+      },
+      useSSL: false,
+      timeout: 5,
+    });
+  }
+
+  connect();
+</script>
+</body>
+</html>

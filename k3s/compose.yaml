@@ -1,0 +1,152 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: trashbin-script
+data:
+  app.py: |
+    import json
+    import os
+    import random
+    import socket
+    import time
+    from datetime import datetime, timezone
+    import paho.mqtt.client as mqtt
+
+    MQTT_BROKER = os.getenv("MQTT_BROKER", "10.255.136.89")
+    MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
+    MQTT_TOPIC = os.getenv("MQTT_TOPIC", "edge/bin1/telemetry")
+    PUBLISH_INTERVAL = float(os.getenv("PUBLISH_INTERVAL", "2"))
+    DEVICE_ID = os.getenv("DEVICE_ID", socket.gethostname())
+
+    BIN_HEIGHT_CM = float(os.getenv("BIN_HEIGHT_CM", "60"))
+    FULL_THRESHOLD_PCT = float(os.getenv("FULL_THRESHOLD_PCT", "80"))
+
+    is_connected = False
+
+
+    def on_connect(client, userdata, flags, reason_code, properties=None):
+        global is_connected
+        is_connected = (reason_code == 0)
+        if is_connected:
+            print(f"Connected to MQTT broker {MQTT_BROKER}:{MQTT_PORT}", flush=True)
+        else:
+            print(f"MQTT connection failed: {reason_code}", flush=True)
+
+
+    def on_disconnect(client, userdata, flags, reason_code, properties=None):
+        global is_connected
+        is_connected = False
+        print(f"Disconnected from broker (reason={reason_code}) -> failover, tetap jalan lokal", flush=True)
+
+
+    def read_distance_cm():
+        return round(random.uniform(5.0, 65.0), 2)
+
+
+    def distance_to_fill_pct(distance_cm):
+        pct = (1 - distance_cm / BIN_HEIGHT_CM) * 100
+        return round(max(0, min(100, pct)), 1)
+
+
+    def actuate(is_full: bool):
+        print(f"[ACTUATOR-SIM] {'BUZZER ON - PENUH' if is_full else 'normal'}", flush=True)
+
+
+    def main():
+        client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=f"{DEVICE_ID}-sensor")
+        client.on_connect = on_connect
+        client.on_disconnect = on_disconnect
+        client.reconnect_delay_set(min_delay=1, max_delay=10)
+
+        print(f"Connecting to {MQTT_BROKER}:{MQTT_PORT}...", flush=True)
+        client.connect(MQTT_BROKER, MQTT_PORT, 60)
+        client.loop_start()
+
+        try:
+            while True:
+                t0 = time.perf_counter()
+
+                distance_cm = read_distance_cm()
+                fill_pct = distance_to_fill_pct(distance_cm)
+                is_full = fill_pct >= FULL_THRESHOLD_PCT
+                actuate(is_full)
+
+                latency_ms = round((time.perf_counter() - t0) * 1000, 3)
+
+                payload = {
+                    "device_id": DEVICE_ID,
+                    "sensor": "HC-SR04",
+                    "distance_cm": distance_cm,
+                    "fill_level_pct": fill_pct,
+                    "is_full": is_full,
+                    "decision_latency_ms": latency_ms,
+                    "network_status": "online" if is_connected else "offline-failover",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+
+                message = json.dumps(payload)
+
+                if is_connected:
+                    info = client.publish(MQTT_TOPIC, message, qos=0)
+                    if info.rc == mqtt.MQTT_ERR_SUCCESS:
+                        print(f"Published -> {MQTT_TOPIC}: {message}", flush=True)
+                    else:
+                        print(f"Publish failed (rc={info.rc}), decision tetap jalan lokal", flush=True)
+                else:
+                    print(f"[LOCAL] {message}", flush=True)
+
+                time.sleep(PUBLISH_INTERVAL)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            client.loop_stop()
+            client.disconnect()
+
+
+    if __name__ == "__main__":
+        main()
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trashbin-edge
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: trashbin-edge
+  template:
+    metadata:
+      labels:
+        app: trashbin-edge
+    spec:
+      containers:
+      - name: edge-agent
+        image: python:3.11-slim
+        command: ["/bin/sh", "-c"]
+        args:
+          - pip install --no-cache-dir paho-mqtt==2.1.0 && python -u /app/app.py
+        env:
+        - name: MQTT_BROKER
+          value: "10.255.136.89"
+        - name: MQTT_PORT
+          value: "1883"
+        - name: MQTT_TOPIC
+          value: "edge/bin1/telemetry"
+        - name: PUBLISH_INTERVAL
+          value: "2"
+        - name: BIN_HEIGHT_CM
+          value: "60"
+        - name: FULL_THRESHOLD_PCT
+          value: "80"
+        - name: DEVICE_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        volumeMounts:
+        - name: script-volume
+          mountPath: /app
+      volumes:
+      - name: script-volume
+        configMap:
+          name: trashbin-script
